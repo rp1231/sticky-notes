@@ -29,4 +29,22 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('@milkdown')) {
+            return 'vendor-milkdown';
+          }
+          if (id.includes('lucide-vue-next')) {
+            return 'vendor-icons';
+          }
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        }
+      }
+    },
+    chunkSizeWarningLimit: 3000,
+  }
 }));

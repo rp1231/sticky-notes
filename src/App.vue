@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue';
 import { Crepe } from '@milkdown/crepe';
 import { Pin, Minus, X } from 'lucide-vue-next';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 // Import Crepe styles
 import '@milkdown/crepe/theme/common/style.css';
@@ -11,17 +12,49 @@ import '@milkdown/crepe/theme/frame.css';
 const editorRef = ref<HTMLDivElement | null>(null);
 const isAlwaysOnTop = ref(false); 
 const appWindow = getCurrentWindow();
+const noteId = ref('');
 
-onMounted(() => {
+// Simple debounce
+let saveTimeout: number | null = null;
+const debounceSave = (content: string) => {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(async () => {
+    try {
+      await invoke('save_note', { id: noteId.value, content });
+    } catch (e) {
+      console.error('Failed to save note:', e);
+    }
+  }, 1000) as unknown as number;
+};
+
+onMounted(async () => {
+  const label = appWindow.label;
+  noteId.value = label.startsWith('note-') ? label.replace('note-', '') : label;
+
+  let initialContent = '# Hello Markdown!\n\nThis is your sticky note.';
+  try {
+    const saved = await invoke<string>('load_note', { id: noteId.value });
+    if (saved) initialContent = saved;
+  } catch (e) {
+    console.error('Failed to load note:', e);
+  }
+
   if (editorRef.value) {
     const crepe = new Crepe({
       root: editorRef.value,
-      defaultValue: '# Hello Markdown!\n\nThis is your single-pane WYSIWYG sticky note.',
+      defaultValue: initialContent,
       features: {
         [Crepe.Feature.Placeholder]: false,
       },
     });
-    crepe.create();
+
+    crepe.on((listener) => {
+      listener.markdownUpdated((_ctx: any, markdown: string) => {
+        debounceSave(markdown);
+      });
+    });
+
+    await crepe.create();
   }
 });
 
@@ -35,6 +68,7 @@ const minimizeWindow = async () => {
 };
 
 const closeWindow = async () => {
+  // For the "sticky note" feel, we hide instead of destroy
   await appWindow.hide();
 };
 </script>
