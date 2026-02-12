@@ -30,3 +30,10 @@ tokio = { version = "1.49.0", features = ["sync", "time", "rt-multi-thread"] }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
 
+[profile.release]
+lto = true # Enable Link Time Optimization
+opt-level = "s" # Optimize for binary size (often faster to load from disk)
+codegen-units = 1 # Better optimizations
+panic = "abort" # Reduce binary size and overhead
+strip = true # Remove debug symbols automatically
+

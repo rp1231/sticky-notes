@@ -67,7 +67,7 @@ fn load_note(id: String, app: tauri::AppHandle) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
-fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>, save: bool) {
+fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>, save: bool, should_show: bool) -> Option<tauri::WebviewWindow<R>> {
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let label = format!("note-{}", id);
 
@@ -75,10 +75,13 @@ fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>,
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        Some(window)
     } else {
         let mut win_config = app.config().app.windows.get(0).unwrap().clone();
         win_config.label = label.clone();
-        win_config.visible = true; // Ensure the new note is visible even if the template is hidden
+        win_config.visible = false; // Always start hidden to prevent flashing
+        win_config.focus = should_show; // Only take focus if we are explicitly showing it
+        
         let window = WebviewWindowBuilder::from_config(app, &win_config)
             .unwrap()
             .build()
@@ -107,6 +110,12 @@ fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>,
         if save {
             update_session_order(app, id, false);
         }
+
+        if should_show {
+            let _ = window.show();
+        }
+        
+        Some(window)
     }
 }
 
@@ -129,7 +138,7 @@ pub fn run() {
                     if shortcut == &new_note_shortcut
                         && event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed
                     {
-                        create_note_window(app, None, true);
+                        create_note_window(app, None, true, true);
                     }
                 })
                 .build(),
@@ -144,13 +153,25 @@ pub fn run() {
 
             // Restore session or create first note (Pro Logic)
             let notes = get_session_order(app.app_handle());
-            if notes.is_empty() {
-                create_note_window(app.app_handle(), None, true);
-            } else {
-                for id in notes {
-                    create_note_window(app.app_handle(), Some(id), false);
+            let handle_for_startup = app.app_handle().clone();
+            
+            // Perform restoration in an async task to keep the startup process non-blocking
+            tauri::async_runtime::spawn(async move {
+                if notes.is_empty() {
+                    create_note_window(&handle_for_startup, None, true, true);
+                } else {
+                    let mut restored = Vec::new();
+                    for id in notes {
+                        if let Some(window) = create_note_window(&handle_for_startup, Some(id), false, false) {
+                            restored.push(window);
+                        }
+                    }
+                    // Batch show all restored windows at once
+                    for window in restored {
+                        let _ = window.show();
+                    }
                 }
-            }
+            });
 
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let new_note_i = MenuItem::with_id(app, "new_note", "New Note", true, None::<&str>)?;
@@ -249,7 +270,7 @@ pub fn run() {
                 app.exit(0);
             }
             "new_note" => {
-                create_note_window(app, None, true);
+                create_note_window(app, None, true, true);
             }
             _ => {}
         })
