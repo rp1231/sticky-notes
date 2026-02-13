@@ -186,7 +186,7 @@ fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>,
 
         println!("Building window with label: {}", label);
         let window_res = WebviewWindowBuilder::new(app, label.clone(), tauri::WebviewUrl::App("index.html".into()))
-            .title("Sticky Note")
+            .title("")
             .inner_size(300.0, 300.0)
             .resizable(true)
             .decorations(false)

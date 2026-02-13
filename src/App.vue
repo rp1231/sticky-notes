@@ -166,7 +166,7 @@ const openNoteWindow = async (id: string) => {
     <div class="drag-handle" data-tauri-drag-region>
       <div class="title-area" data-tauri-drag-region>
         <LayoutDashboard v-if="isDashboard" :size="16" class="title-icon" />
-        <span class="title-text" data-tauri-drag-region>{{ isDashboard ? 'Notes Dashboard' : 'Sticky Note' }}</span>
+        <span class="title-text" data-tauri-drag-region>{{ isDashboard ? 'Notes Dashboard' : '' }}</span>
       </div>
       <div class="controls">
         <button 
