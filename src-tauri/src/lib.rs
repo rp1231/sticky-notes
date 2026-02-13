@@ -8,7 +8,7 @@ use std::sync::RwLock;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, RunEvent, Runtime, WebviewWindowBuilder,
+    Emitter, EventTarget, Manager, RunEvent, Runtime, WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_store::StoreExt;
@@ -19,28 +19,32 @@ struct IsBatchFocusing(AtomicBool);
 struct NoteRegistry(RwLock<HashSet<String>>);
 
 fn get_session_order<R: Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
-    let store = app.store("session.bin").unwrap();
-    store
-        .get("open_notes")
-        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
-        .unwrap_or_else(|| vec![])
+    if let Ok(store) = app.store("session.bin") {
+        store
+            .get("open_notes")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .unwrap_or_else(|| vec![])
+    } else {
+        vec![]
+    }
 }
 
 fn update_session_order<R: Runtime>(app: &tauri::AppHandle<R>, note_id: String, remove: bool) {
-    let store = app.store("session.bin").unwrap();
-    let mut order = get_session_order(app);
+    if let Ok(store) = app.store("session.bin") {
+        let mut order = get_session_order(app);
 
-    order.retain(|id| id != &note_id);
-    if !remove {
-        order.push(note_id);
+        order.retain(|id| id != &note_id);
+        if !remove {
+            order.push(note_id);
+        }
+
+        let _ = store.set("open_notes", serde_json::to_value(order).unwrap());
+        let _ = store.save();
     }
-
-    store.set("open_notes", serde_json::to_value(order).unwrap());
-    let _ = store.save();
 }
 
 #[tauri::command]
-fn save_note(id: String, content: String, app: tauri::AppHandle) -> Result<(), String> {
+async fn save_note(id: String, content: String, app: tauri::AppHandle) -> Result<(), String> {
     let path = app
         .path()
         .app_data_dir()
@@ -53,7 +57,7 @@ fn save_note(id: String, content: String, app: tauri::AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-fn load_note(id: String, app: tauri::AppHandle) -> Result<String, String> {
+async fn load_note(id: String, app: tauri::AppHandle) -> Result<String, String> {
     let path = app
         .path()
         .app_data_dir()
@@ -68,6 +72,96 @@ fn load_note(id: String, app: tauri::AppHandle) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn delete_note(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("notes")
+        .join(format!("{}.md", id));
+
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+
+    update_session_order(&app, id.clone(), true);
+    
+    // Close window if it's open
+    let label = format!("note-{}", id);
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.close();
+    }
+
+    let _ = app.emit_to(EventTarget::any(), "refresh-notes", ());
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct NoteInfo {
+    id: String,
+    preview: String,
+}
+
+#[tauri::command]
+async fn get_all_notes(app: tauri::AppHandle) -> Result<Vec<NoteInfo>, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("notes");
+
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut notes = Vec::new();
+    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let id = path.file_stem().unwrap().to_str().unwrap().to_string();
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            // Take first 100 chars for preview
+            let preview = content.chars().take(100).collect();
+            notes.push(NoteInfo { id, preview });
+        }
+    }
+    Ok(notes)
+}
+
+#[tauri::command]
+async fn open_note_window_cmd(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    create_note_window(&app, Some(id), true, true);
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_new_note_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    println!("Backend: create_new_note_cmd triggered");
+    match create_note_window(&app, None, true, true) {
+        Some(_) => {
+            println!("Backend: Note window created successfully");
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = handle.emit_to(EventTarget::any(), "refresh-notes", ());
+            });
+            Ok(())
+        },
+        None => {
+            println!("Backend: Failed to create note window");
+            Err("Failed to create note window".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+async fn trigger_refresh_notes(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app.emit_to(EventTarget::any(), "refresh-notes", ());
+    Ok(())
+}
+
 fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>, save: bool, should_show: bool) -> Option<tauri::WebviewWindow<R>> {
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let label = format!("note-{}", id);
@@ -78,45 +172,73 @@ fn create_note_window<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<String>,
         let _ = window.set_focus();
         Some(window)
     } else {
-        let mut win_config = app.config().app.windows.get(0).unwrap().clone();
-        win_config.label = label.clone();
-        win_config.visible = false; // Always start hidden to prevent flashing
-        win_config.focus = should_show; // Only take focus if we are explicitly showing it
-        
-        let window = WebviewWindowBuilder::from_config(app, &win_config)
-            .unwrap()
-            .build()
-            .unwrap();
+        // Ensure notes directory exists so Dashboard can find it
+        if let Ok(path) = app.path().app_data_dir() {
+            let notes_path = path.join("notes");
+            let _ = fs::create_dir_all(&notes_path);
+            
+            // If it's a new note, create an empty file so it appears in Dashboard immediately
+            let note_file = notes_path.join(format!("{}.md", id));
+            if !note_file.exists() {
+                let _ = fs::write(note_file, "");
+            }
+        }
 
-        // Register window as a sticky note
-        app.state::<NoteRegistry>().0.write().unwrap().insert(label.clone());
+        println!("Building window with label: {}", label);
+        let window_res = WebviewWindowBuilder::new(app, label.clone(), tauri::WebviewUrl::App("index.html".into()))
+            .title("Sticky Note")
+            .inner_size(300.0, 300.0)
+            .resizable(true)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(false)
+            .skip_taskbar(true)
+            .visible(false)
+            .build();
 
-        let id_for_events = id.clone();
-        let label_for_events = label.clone();
-        let handle_for_events = app.clone();
-        window.on_window_event(move |event| match event {
-            tauri::WindowEvent::Focused(true) => {
-                let is_batch = handle_for_events.state::<IsBatchFocusing>();
-                if !is_batch.0.load(Ordering::SeqCst) {
-                    update_session_order(&handle_for_events, id_for_events.clone(), false);
+        println!("Window build result for {}: {:?}", label, window_res.as_ref().map(|_| "Ok").map_err(|e| e));
+
+        match window_res {
+            Ok(window) => {
+                // Register window as a sticky note
+                if let Ok(mut registry) = app.state::<NoteRegistry>().0.write() {
+                    registry.insert(label.clone());
                 }
-            }
-            tauri::WindowEvent::Destroyed => {
-                handle_for_events.state::<NoteRegistry>().0.write().unwrap().remove(&label_for_events);
-                update_session_order(&handle_for_events, id_for_events.clone(), true);
-            }
-            _ => {}
-        });
 
-        if save {
-            update_session_order(app, id, false);
-        }
+                let id_for_events = id.clone();
+                let label_for_events = label.clone();
+                let handle_for_events = app.clone();
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Focused(true) => {
+                        let is_batch = handle_for_events.state::<IsBatchFocusing>();
+                        if !is_batch.0.load(Ordering::SeqCst) {
+                            update_session_order(&handle_for_events, id_for_events.clone(), false);
+                        }
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        if let Ok(mut registry) = handle_for_events.state::<NoteRegistry>().0.write() {
+                            registry.remove(&label_for_events);
+                        }
+                        update_session_order(&handle_for_events, id_for_events.clone(), true);
+                    }
+                    _ => {}
+                });
 
-        if should_show {
-            let _ = window.show();
+                if save {
+                    update_session_order(app, id, false);
+                }
+
+                if should_show {
+                    let _ = window.show();
+                }
+                
+                Some(window)
+            },
+            Err(e) => {
+                println!("Error building window: {:?}", e);
+                None
+            }
         }
-        
-        Some(window)
     }
 }
 
@@ -145,7 +267,15 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![save_note, load_note])
+        .invoke_handler(tauri::generate_handler![
+            save_note,
+            load_note,
+            delete_note,
+            get_all_notes,
+            open_note_window_cmd,
+            create_new_note_cmd,
+            trigger_refresh_notes
+        ])
         .setup(move |app| {
             app.manage(AllowExit(AtomicBool::new(false)));
             app.manage(IsBatchFocusing(AtomicBool::new(false)));
@@ -176,17 +306,30 @@ pub fn run() {
 
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let new_note_i = MenuItem::with_id(app, "new_note", "New Note", true, None::<&str>)?;
+            let dashboard_i = MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
             let open_data_i = MenuItem::with_id(app, "open_data", "Open Data Folder", true, None::<&str>)?;
 
             let menu = Menu::with_items(
                 app,
                 &[
                     &new_note_i,
+                    &dashboard_i,
                     &open_data_i,
                     &PredefinedMenuItem::separator(app)?,
                     &quit_i
                 ],
             )?;
+
+            // Configure main window (Dashboard) behavior
+            if let Some(main_win) = app.get_webview_window("main") {
+                let main_win_clone = main_win.clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        main_win_clone.hide().unwrap();
+                        api.prevent_close();
+                    }
+                });
+            }
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -207,11 +350,16 @@ pub fn run() {
 
                         // 1. Get ONLY windows that are explicitly registered in our NoteRegistry
                         let registry_state = handle.state::<NoteRegistry>();
-                        let registry = registry_state.0.read().unwrap();
-                        let mut windows: Vec<_> = registry.iter()
-                            .filter_map(|label| handle.get_webview_window(label))
-                            .filter(|w| w.is_visible().unwrap_or(false))
-                            .collect();
+                        let windows_to_process = {
+                            let registry = registry_state.0.read().unwrap();
+                            registry.iter()
+                                .filter_map(|label| handle.get_webview_window(label))
+                                .filter(|w| w.is_visible().unwrap_or(false))
+                                .collect::<Vec<_>>()
+                        };
+
+                        let mut windows = windows_to_process;
+
 
                         let order = get_session_order(handle);
 
@@ -278,6 +426,14 @@ pub fn run() {
             }
             "new_note" => {
                 create_note_window(app, None, true, true);
+            }
+            "dashboard" => {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.show();
+                    let _ = main_win.unminimize();
+                    let _ = main_win.set_focus();
+                    let _ = app.emit_to(EventTarget::any(), "refresh-notes", ());
+                }
             }
             "open_data" => {
                 if let Ok(path) = app.path().app_data_dir() {

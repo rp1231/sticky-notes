@@ -13,14 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "Sticky Note",
-        "width": 300,
-        "height": 300,
+        "title": "Notes Dashboard",
+        "width": 600,
+        "height": 400,
         "resizable": true,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": false,
-        "skipTaskbar": true,
+        "skipTaskbar": false,
         "visible": false,
         "backgroundColor": "#FFF6CB"
       }
