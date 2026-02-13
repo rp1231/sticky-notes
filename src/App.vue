@@ -13,6 +13,7 @@ const editorRef = ref<HTMLDivElement | null>(null);
 const isAlwaysOnTop = ref(false); 
 const appWindow = getCurrentWindow();
 const noteId = ref('');
+const currentContent = ref('');
 
 // Simple debounce
 let saveTimeout: number | null = null;
@@ -21,6 +22,7 @@ const debounceSave = (content: string) => {
   saveTimeout = setTimeout(async () => {
     try {
       await invoke('save_note', { id: noteId.value, content });
+      saveTimeout = null;
     } catch (e) {
       console.error('Failed to save note:', e);
     }
@@ -31,10 +33,13 @@ onMounted(async () => {
   const label = appWindow.label;
   noteId.value = label.startsWith('note-') ? label.replace('note-', '') : label;
 
-  let initialContent = '# Hello Markdown!\n\nThis is your sticky note.';
+  let initialContent = '';
   try {
     const saved = await invoke<string>('load_note', { id: noteId.value });
-    if (saved) initialContent = saved;
+    if (saved) {
+      initialContent = saved;
+      currentContent.value = saved;
+    }
   } catch (e) {
     console.error('Failed to load note:', e);
   }
@@ -50,6 +55,7 @@ onMounted(async () => {
 
     crepe.on((listener) => {
       listener.markdownUpdated((_ctx: any, markdown: string) => {
+        currentContent.value = markdown;
         debounceSave(markdown);
       });
     });
@@ -68,8 +74,18 @@ const minimizeWindow = async () => {
 };
 
 const closeWindow = async () => {
-  // For the "sticky note" feel, we hide instead of destroy
-  await appWindow.hide();
+  // If there's a pending save, execute it now
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+    try {
+      await invoke('save_note', { id: noteId.value, content: currentContent.value });
+    } catch (e) {
+      console.error('Failed to save note on close:', e);
+    }
+  }
+  // Properly close the window so it's destroyed and removed from session
+  await appWindow.close();
 };
 </script>
 

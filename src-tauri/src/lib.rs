@@ -36,6 +36,7 @@ fn update_session_order<R: Runtime>(app: &tauri::AppHandle<R>, note_id: String, 
     }
 
     store.set("open_notes", serde_json::to_value(order).unwrap());
+    let _ = store.save();
 }
 
 #[tauri::command]
@@ -175,10 +176,16 @@ pub fn run() {
 
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let new_note_i = MenuItem::with_id(app, "new_note", "New Note", true, None::<&str>)?;
+            let open_data_i = MenuItem::with_id(app, "open_data", "Open Data Folder", true, None::<&str>)?;
 
             let menu = Menu::with_items(
                 app,
-                &[&new_note_i, &PredefinedMenuItem::separator(app)?, &quit_i],
+                &[
+                    &new_note_i,
+                    &open_data_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit_i
+                ],
             )?;
 
             let _tray = TrayIconBuilder::new()
@@ -272,6 +279,11 @@ pub fn run() {
             "new_note" => {
                 create_note_window(app, None, true, true);
             }
+            "open_data" => {
+                if let Ok(path) = app.path().app_data_dir() {
+                    let _ = tauri_plugin_opener::reveal_item_in_dir(path);
+                }
+            }
             _ => {}
         })
         .build(tauri::generate_context!())
@@ -280,6 +292,8 @@ pub fn run() {
             RunEvent::ExitRequested { api, .. } => {
                 let allow_exit = app_handle.state::<AllowExit>();
                 if !allow_exit.0.load(Ordering::SeqCst) {
+                    // We only prevent the application from exiting. 
+                    // Individual windows can still be destroyed (closed).
                     api.prevent_exit();
                 }
             }
